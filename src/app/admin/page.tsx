@@ -12,6 +12,7 @@ export default function AdminPanel() {
   const [credits, setCredits] = useState<Record<string, string>>({});
   const [pendingBets, setPendingBets] = useState<any[]>([]);
   const [processingBet, setProcessingBet] = useState<string | null>(null);
+  const [isAutoSettling, setIsAutoSettling] = useState(false);
 
   // New Account Creation States
   const [newUsername, setNewUsername] = useState('');
@@ -101,6 +102,52 @@ export default function AdminPanel() {
       alert("Ndodhi një gabim gjatë procesimit të bastit.");
     }
     setProcessingBet(null);
+  };
+
+  const handleAutoSettle = async () => {
+    setIsAutoSettling(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      const res = await fetch('/api/admin/settle', { 
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to auto-settle');
+      
+      alert(`Auto-settlement complete. Settled ${data.settled} bets.`);
+      fetchPendingBets();
+      fetchUsers();
+    } catch (error: any) {
+      console.error(error);
+      alert("Gabim gjatë auto-settlement: " + error.message);
+    }
+    setIsAutoSettling(false);
+  };
+
+  const handleForceSettle = async () => {
+    setIsAutoSettling(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      const res = await fetch('/api/admin/settle?force=1', { 
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to force-settle');
+      
+      alert(`Forced re-evaluation complete. Checked and fixed ${data.settled} bets.`);
+      fetchPendingBets();
+      fetchUsers();
+    } catch (error: any) {
+      console.error(error);
+      alert("Gabim gjatë force-settlement: " + error.message);
+    }
+    setIsAutoSettling(false);
   };
 
   const handleCreateStudent = async (e: React.FormEvent) => {
@@ -194,7 +241,25 @@ export default function AdminPanel() {
 
       {/* Bets Management Panel */}
       <div className="space-y-4">
-        <h3 className="text-lg font-bold text-white">Baste në Pritje ({pendingBets.length})</h3>
+        <div className="flex justify-between items-center">
+          <h3 className="text-lg font-bold text-white">Baste në Pritje ({pendingBets.length})</h3>
+          <div className="flex gap-2">
+            <button 
+              onClick={handleForceSettle}
+              disabled={isAutoSettling}
+              className="bg-rose-600 hover:bg-rose-500 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg shadow-rose-900/20"
+            >
+              {isAutoSettling ? 'Duke procesuar...' : 'Fix All Bets (Force)'}
+            </button>
+            <button 
+              onClick={handleAutoSettle}
+              disabled={isAutoSettling || pendingBets.length === 0}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg shadow-emerald-900/20"
+            >
+              {isAutoSettling ? 'Duke procesuar...' : 'Auto-Settle Finished Matches'}
+            </button>
+          </div>
+        </div>
         {pendingBets.length === 0 ? (
           <div className="glass-panel p-6 text-center text-slate-400 text-sm border-t-emerald-500/30 border-t-4">
             Nuk ka asnjë bast në pritje.

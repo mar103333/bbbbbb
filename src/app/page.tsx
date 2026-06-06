@@ -88,10 +88,20 @@ const MatchCard = ({ match }: { match: any }) => {
   const alternateGoals = allAltTotals.filter((o: any) => o.point <= 6.5);
   const alternateCorners = allAltTotals.filter((o: any) => o.point >= 7.5);
 
-  const finalGoalOutcomes = alternateGoals.length > 0 ? alternateGoals : totalsMarketOutcomes;
-  const finalCornerOutcomes = alternateCorners; // Remove any invalid fallbacks like 'corners' !
+  // Calculate current total goals for live matches (to filter out settled lines)
+  const currentTotalGoals = match.is_live && match.live_scores && match.live_scores.length > 0
+    ? match.live_scores.reduce((sum: number, s: any) => sum + parseInt(s.score || '0', 10), 0)
+    : null;
 
-  const groupedTotals = finalGoalOutcomes.length > 0 ? groupOutcomesByPoint(finalGoalOutcomes).slice(0, 8) : [];
+  const finalGoalOutcomes = alternateGoals.length > 0 ? alternateGoals : totalsMarketOutcomes;
+  const finalCornerOutcomes = alternateCorners;
+
+  // Filter settled lines: hide Over/Under X when current goals > X (already determined)
+  const filteredGoalOutcomes = currentTotalGoals !== null
+    ? finalGoalOutcomes.filter((o: any) => o.point > currentTotalGoals)
+    : finalGoalOutcomes;
+
+  const groupedTotals = filteredGoalOutcomes.length > 0 ? groupOutcomesByPoint(filteredGoalOutcomes).slice(0, 8) : [];
   const groupedCorners = finalCornerOutcomes.length > 0 ? groupOutcomesByPoint(finalCornerOutcomes).slice(0, 15) : [];
   const groupedTotalsQ1 = halfTotalsOutcomes.length > 0 ? groupOutcomesByPoint(halfTotalsOutcomes).slice(0, 5) : [];
 
@@ -111,12 +121,15 @@ const MatchCard = ({ match }: { match: any }) => {
   };
   const groupedSpreads = alternateSpreadsOutcomes.length > 0 ? groupSpreadsByPoint(alternateSpreadsOutcomes).slice(0, 10) : [];
 
-  if (!h2hMarketOutcomes || h2hMarketOutcomes.length === 0) return null;
+  const hasOdds = h2hMarketOutcomes && h2hMarketOutcomes.length > 0;
+
+  // For matches with no bookmaker odds (API-Football only), render score-only card
+  if (!hasOdds && !match.is_live) return null;
 
   const h2h = h2hMarketOutcomes;
-  const homeOdd = h2h.find((o: any) => o.name === homeTeam) || h2h[0];
-  const awayOdd = h2h.find((o: any) => o.name === awayTeam) || h2h[1];
-  const drawOdd = h2h.find((o: any) => o.name === 'Draw') || { price: "N/A", name: 'Draw' };
+  const homeOdd = hasOdds ? (h2h.find((o: any) => o.name === homeTeam) || h2h[0]) : null;
+  const awayOdd = hasOdds ? (h2h.find((o: any) => o.name === awayTeam) || h2h[1]) : null;
+  const drawOdd = hasOdds ? (h2h.find((o: any) => o.name === 'Draw') || { price: "N/A", name: 'Draw' }) : null;
 
   const isSelected = (marketName: string, value: string) => {
     return selections.some((s) => s.matchId === match.id && s.market === marketName && s.outcomeName === value);
@@ -139,8 +152,8 @@ const MatchCard = ({ match }: { match: any }) => {
   const fullDateTime = `${datePart} ${timePart}`;
 
   const renderUnavailable = () => (
-    <div className="col-span-2 py-2 px-3 bg-slate-800/50 rounded-lg border border-slate-700/50 text-center">
-      <span className="text-xs text-slate-500 font-bold uppercase tracking-wider">[Tregu i Padisponueshëm]</span>
+    <div className="col-span-2 py-2 px-3 bg-slate-800/30 rounded-lg border border-slate-700/30 text-center">
+      <span className="text-[10px] text-slate-600 font-bold uppercase tracking-widest">— Line Suspended —</span>
     </div>
   );
 
@@ -151,26 +164,28 @@ const MatchCard = ({ match }: { match: any }) => {
       setIsLoading(true);
       setDeepError(false);
       try {
-        const res = await fetch(`/api/event/${match.id}?sport=${match.sport_key}`);
+        // Prefer Odds API event ID for live matches that have one (keeps live in-play odds accurate)
+        // Fall back to apifootball_ ID for matches without Odds API coverage
+        const eventId = match.odds_event_id || match.id;
+        const sportKey = match.odds_sport_key || match.sport_key;
+        const res = await fetch(`/api/event/${eventId}?sport=${sportKey}`);
         if (res.ok) {
           const data = await res.json();
-          if (!data || !data.bookmakers || data.bookmakers.length === 0) {
-            console.warn("API returned empty payload or no bookmakers for this event");
+          const bookmakers = data?.bookmakers || (Array.isArray(data) ? data[0]?.bookmakers : null) || [];
+          if (bookmakers.length === 0) {
+            console.warn(`[DeepOdds] Empty bookmakers for event ${match.id}`);
             setDeepError(true);
           } else {
-            console.log("Deep Odds payload keys:", Object.keys(data));
-            console.log("Bookmakers length:", data.bookmakers.length);
-            const activeBook = data.bookmakers[0];
-            if (activeBook && activeBook.markets) {
-              console.log(`Markets in ${activeBook.key}:`, activeBook.markets.map((m: any) => m.key));
-            }
-            setDeepOdds(data);
+            console.log(`[DeepOdds] ${bookmakers.length} bookmaker(s) loaded`);
+            console.log(`[DeepOdds] Markets:`, bookmakers[0]?.markets?.map((m: any) => m.key));
+            setDeepOdds({ bookmakers });
           }
         } else {
+          console.error(`[DeepOdds] HTTP ${res.status} for event ${match.id}`);
           setDeepError(true);
         }
       } catch (e) {
-        console.error("Failed to load deep odds", e);
+        console.error('[DeepOdds] Network error:', e);
         setDeepError(true);
       }
       setIsLoading(false);
@@ -181,9 +196,15 @@ const MatchCard = ({ match }: { match: any }) => {
     <div className="glass-panel p-5 relative overflow-hidden group mb-4">
       <div className="cursor-pointer" onClick={toggleExpand}>
         <div className="flex justify-between items-center mb-4 relative z-10">
-          <div className="flex gap-2 items-center">
+          <div className="flex gap-2 items-center flex-wrap">
+            {match.is_live && (
+              <span className="flex items-center gap-1 bg-red-500/20 border border-red-500/40 text-red-400 text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full">
+                <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse"></span>
+                {match.match_minute || 'LIVE'}
+              </span>
+            )}
             <span className="text-[11px] font-bold text-emerald-400 tracking-wide uppercase">
-              {fullDateTime}
+              {match.league_country ? `${match.league_country} — ` : ''}{fullDateTime}
             </span>
           </div>
           <div className="text-slate-400">
@@ -193,35 +214,52 @@ const MatchCard = ({ match }: { match: any }) => {
 
         <div className="flex justify-between items-center mb-5 relative z-10">
           <div className="text-white font-bold text-base md:text-lg flex-1 text-left">{homeTeam}</div>
-          <div className="text-slate-500 font-bold text-xs mx-4">VS</div>
+          {match.is_live && match.live_scores && match.live_scores.length > 0 ? (() => {
+            const homeScore = match.live_scores.find((s: any) => s.name === match.home_team)?.score ?? '?';
+            const awayScore = match.live_scores.find((s: any) => s.name === match.away_team)?.score ?? '?';
+            return (
+              <div className="flex flex-col items-center mx-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl font-black text-white tabular-nums">{homeScore}</span>
+                  <span className="text-slate-500 font-bold text-sm">-</span>
+                  <span className="text-2xl font-black text-white tabular-nums">{awayScore}</span>
+                </div>
+                <span className="text-[9px] font-black text-red-400 tracking-widest uppercase animate-pulse mt-0.5">Live</span>
+              </div>
+            );
+          })() : (
+            <div className="text-slate-500 font-bold text-xs mx-4">VS</div>
+          )}
           <div className="text-white font-bold text-base md:text-lg flex-1 text-right">{awayTeam}</div>
         </div>
       </div>
 
       {/* CATEGORY A: MAIN MARKETS */}
-      <div className="grid grid-cols-3 gap-3 relative z-10">
-        <button
-          className={`btn-odds ${isSelected('Match Winner', homeOdd.name) ? 'selected' : ''}`}
-          onClick={(e) => { e.stopPropagation(); handleSelect('Match Winner', homeOdd.name, homeOdd.price); }}
-        >
-          <span className="odd-label text-center leading-tight truncate px-1" title={homeTeam}>{homeTeam}</span>
-          <span className="odd-value font-black text-white">{homeOdd.price !== 'N/A' ? Number(homeOdd.price).toFixed(2) : 'N/A'}</span>
-        </button>
-        <button
-          className={`btn-odds ${isSelected('Match Winner', drawOdd.name) ? 'selected' : ''}`}
-          onClick={(e) => { e.stopPropagation(); handleSelect('Match Winner', drawOdd.name, drawOdd.price); }}
-        >
-          <span className="odd-label text-center leading-tight">Draw</span>
-          <span className="odd-value font-black text-white">{drawOdd.price !== 'N/A' ? Number(drawOdd.price).toFixed(2) : 'N/A'}</span>
-        </button>
-        <button
-          className={`btn-odds ${isSelected('Match Winner', awayOdd.name) ? 'selected' : ''}`}
-          onClick={(e) => { e.stopPropagation(); handleSelect('Match Winner', awayOdd.name, awayOdd.price); }}
-        >
-          <span className="odd-label text-center leading-tight truncate px-1" title={awayTeam}>{awayTeam}</span>
-          <span className="odd-value font-black text-white">{awayOdd.price !== 'N/A' ? Number(awayOdd.price).toFixed(2) : 'N/A'}</span>
-        </button>
-      </div>
+      {hasOdds ? (
+        <div className="grid grid-cols-3 gap-3 relative z-10">
+          <button
+            className={`btn-odds ${isSelected('Match Winner', homeOdd.name) ? 'selected' : ''}`}
+            onClick={(e) => { e.stopPropagation(); handleSelect('Match Winner', homeOdd.name, homeOdd.price); }}
+          >
+            <span className="odd-label text-center leading-tight truncate px-1" title={homeTeam}>{homeTeam}</span>
+            <span className="odd-value font-black text-white">{homeOdd.price !== 'N/A' ? Number(homeOdd.price).toFixed(2) : 'N/A'}</span>
+          </button>
+          <button
+            className={`btn-odds ${isSelected('Match Winner', drawOdd.name) ? 'selected' : ''}`}
+            onClick={(e) => { e.stopPropagation(); handleSelect('Match Winner', drawOdd.name, drawOdd.price); }}
+          >
+            <span className="odd-label text-center leading-tight">Draw</span>
+            <span className="odd-value font-black text-white">{drawOdd.price !== 'N/A' ? Number(drawOdd.price).toFixed(2) : 'N/A'}</span>
+          </button>
+          <button
+            className={`btn-odds ${isSelected('Match Winner', awayOdd.name) ? 'selected' : ''}`}
+            onClick={(e) => { e.stopPropagation(); handleSelect('Match Winner', awayOdd.name, awayOdd.price); }}
+          >
+            <span className="odd-label text-center leading-tight truncate px-1" title={awayTeam}>{awayTeam}</span>
+            <span className="odd-value font-black text-white">{awayOdd.price !== 'N/A' ? Number(awayOdd.price).toFixed(2) : 'N/A'}</span>
+          </button>
+        </div>
+      ) : null}
 
       {expanded && (
         <div className="mt-4 pt-4 border-t border-slate-700/50 space-y-6 animate-slide-up relative z-10">
@@ -232,52 +270,18 @@ const MatchCard = ({ match }: { match: any }) => {
             </div>
           ) : deepError ? (
             <div className="text-center py-8 bg-red-900/20 border border-red-500/50 rounded-xl p-6">
-              <div className="text-red-400 font-bold mb-2">[Error Logged: Check Browser Inspector for Key Mismatches]</div>
-              <p className="text-xs text-red-300/70 mb-4">The API returned an error status code or an empty payload for deep markets.</p>
-              <button 
+              <div className="text-red-400 font-bold mb-2 text-sm">Tregu i Thellë i Padisponueshëm</div>
+              <p className="text-xs text-red-300/60 mb-4">Ky event nuk ka kuota të detajuara në dispozicion momentalisht.</p>
+              <button
                 onClick={(e) => {
                   e.stopPropagation();
                   setDeepError(false);
-                  setDeepOdds({
-                    bookmakers: [{
-                      key: 'mock',
-                      title: 'Mock Bookmaker',
-                      markets: [
-                        { key: 'h2h', outcomes: [{name: homeTeam, price: 2.1}, {name: 'Draw', price: 3.0}, {name: awayTeam, price: 2.8}] },
-                        { key: 'draw_no_bet', outcomes: [{name: homeTeam, price: 1.5}, {name: awayTeam, price: 2.1}] },
-                        { key: 'alternate_totals', outcomes: [
-                          {name: 'Over', point: 1.5, price: 1.2}, {name: 'Under', point: 1.5, price: 4.5},
-                          {name: 'Over', point: 2.5, price: 1.8}, {name: 'Under', point: 2.5, price: 1.95},
-                          {name: 'Over', point: 3.5, price: 3.1}, {name: 'Under', point: 3.5, price: 1.3}
-                        ]},
-                        { key: 'btts', outcomes: [{name: 'Yes', price: 1.7}, {name: 'No', price: 2.1}] },
-                        { key: 'alternate_spreads', outcomes: [
-                          {name: homeTeam, point: -1.5, price: 2.1}, {name: awayTeam, point: 1.5, price: 1.65},
-                          {name: homeTeam, point: -0.5, price: 1.8}, {name: awayTeam, point: 0.5, price: 1.95}
-                        ]},
-                        { key: 'totals_h1', outcomes: [
-                          {name: 'Over', point: 0.5, price: 1.4}, {name: 'Under', point: 0.5, price: 2.7},
-                          {name: 'Over', point: 1.5, price: 2.5}, {name: 'Under', point: 1.5, price: 1.5}
-                        ]},
-                        { key: 'h2h_h1', outcomes: [{name: homeTeam, price: 2.6}, {name: 'Draw', price: 2.1}, {name: awayTeam, price: 3.2}] },
-                        { key: 'btts_both_halves', outcomes: [{name: 'Yes', price: 4.5}, {name: 'No', price: 1.15}] },
-                        { key: 'correct_score', outcomes: [
-                          {name: '1-0', price: 7.0}, {name: '2-0', price: 10.0}, {name: '2-1', price: 9.0},
-                          {name: '0-0', price: 8.5}, {name: '1-1', price: 6.0}, {name: '2-2', price: 14.0},
-                          {name: '0-1', price: 8.0}, {name: '0-2', price: 12.0}, {name: '1-2', price: 10.5}
-                        ]},
-                        { key: 'first_team_to_score', outcomes: [{name: homeTeam, price: 1.75}, {name: 'No Goal', price: 8.5}, {name: awayTeam, price: 2.05}] },
-                        { key: 'h2h_btts', outcomes: [
-                          {name: `${homeTeam} & Yes`, price: 4.2}, {name: `Draw & Yes`, price: 4.5}, {name: `${awayTeam} & Yes`, price: 5.5},
-                          {name: `${homeTeam} & No`, price: 3.6}, {name: `Draw & No`, price: 9.0}, {name: `${awayTeam} & No`, price: 4.8}
-                        ]}
-                      ]
-                    }]
-                  });
+                  setDeepOdds(null);
+                  toggleExpand();
                 }}
-                className="bg-red-500/20 hover:bg-red-500/30 text-red-300 px-4 py-2 rounded font-bold text-xs uppercase tracking-wider transition-all"
+                className="bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 px-4 py-2 rounded font-bold text-xs uppercase tracking-wider transition-all"
               >
-                Load Local Mock Data
+                Provo Përsëri
               </button>
             </div>
           ) : (
@@ -499,62 +503,48 @@ const MatchCard = ({ match }: { match: any }) => {
 };
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'live' | 'upcoming'>('upcoming');
-  const [matches, setMatches] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'live' | 'upcoming'>('live');
+  const [upcomingMatches, setUpcomingMatches] = useState<any[]>([]);
+  const [liveMatches, setLiveMatches] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [liveLoading, setLiveLoading] = useState(false);
 
   useEffect(() => {
-    fetchMatches();
+    fetchUpcoming();
+    fetchLive();
+    // Refresh live every 60 seconds
+    const interval = setInterval(fetchLive, 60000);
+    return () => clearInterval(interval);
   }, []);
 
-  const fetchMatches = async () => {
+  const fetchUpcoming = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/odds?t=' + Date.now(), { cache: 'no-store' });
+      const res = await fetch('/api/odds', { cache: 'no-store' });
       const data = await res.json();
       if (Array.isArray(data)) {
-        setMatches(data);
-      } else {
-        setMatches([]);
+        const now = Date.now();
+        setUpcomingMatches(data.filter((m: any) => new Date(m.commence_time).getTime() > now));
       }
-    } catch (e) {
-      console.error(e);
-    }
+    } catch (e) { console.error(e); }
     setLoading(false);
   };
 
-  const getFilteredMatches = () => {
-    const now = new Date().getTime();
-    
-    // Strict ISO time filter to remove expired matches instantly
-    const validMatches = matches.filter(match => {
-      const commenceTime = new Date(match.commence_time).getTime();
-      return commenceTime > now;
-    });
-
-    const live = validMatches.filter(match => {
-      const commenceTime = new Date(match.commence_time).getTime();
-      // For the school project demo, we treat matches happening within the next 24 hours as "Live" 
-      // because the free tier of The Odds API automatically drops matches once they actually start.
-      return commenceTime <= now + 24 * 60 * 60 * 1000;
-    });
-
-    const upcoming = validMatches.filter(match => {
-      const commenceTime = new Date(match.commence_time).getTime();
-      return commenceTime > now + 24 * 60 * 60 * 1000;
-    });
-
-    if (activeTab === 'live') {
-      return live;
-    } else {
-      return upcoming;
-    }
+  const fetchLive = async () => {
+    setLiveLoading(true);
+    try {
+      const res = await fetch('/api/live', { cache: 'no-store' });
+      const data = await res.json();
+      if (Array.isArray(data)) setLiveMatches(data);
+    } catch (e) { console.error(e); }
+    setLiveLoading(false);
   };
 
-  const filteredMatches = getFilteredMatches();
+  const currentMatches = activeTab === 'live' ? liveMatches : upcomingMatches;
+  const isLoading = activeTab === 'live' ? liveLoading : loading;
 
-  const groupedMatches = filteredMatches.reduce((acc: any, match: any) => {
-    let title = match.sport_title || 'Të Tjera';
+  const groupedMatches = currentMatches.reduce((acc: any, match: any) => {
+    const title = match.sport_title || 'Të Tjera';
     if (!acc[title]) acc[title] = [];
     acc[title].push(match);
     return acc;
@@ -568,21 +558,48 @@ export default function Home() {
           onClick={() => setActiveTab('live')}
         >
           Ndeshjet Live
+          {liveMatches.length > 0 && (
+            <span className="ml-2 inline-flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse inline-block"></span>
+              <span className={`text-xs font-black ${activeTab === 'live' ? 'text-white' : 'text-red-400'}`}>{liveMatches.length}</span>
+            </span>
+          )}
         </button>
         <button
           className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${activeTab === 'upcoming' ? 'bg-emerald-500 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
           onClick={() => setActiveTab('upcoming')}
         >
           Ndeshjet e Ardhshme
+          {upcomingMatches.length > 0 && (
+            <span className={`ml-2 text-xs font-black ${activeTab === 'upcoming' ? 'text-white/80' : 'text-slate-500'}`}>{upcomingMatches.length}</span>
+          )}
         </button>
       </div>
 
-      {loading ? (
-        <div className="text-center p-12 text-slate-400">Duke kërkuar ndeshjet nga The Odds API...</div>
+      {isLoading ? (
+        <div className="text-center p-12 text-slate-400">
+          {activeTab === 'live' ? 'Duke kërkuar ndeshjet live...' : 'Duke kërkuar ndeshjet nga API...'}
+        </div>
       ) : (
         <div className="space-y-8">
           {Object.keys(groupedMatches).length === 0 && (
-            <div className="text-center p-8 text-slate-400">Asnjë ndeshje nuk u gjet për momentin.</div>
+            <div className="text-center p-10">
+              {activeTab === 'live' ? (
+                <div className="space-y-2">
+                  <div className="text-2xl">⚽</div>
+                  <p className="text-slate-300 font-semibold">Asnjë ndeshje live momentalisht</p>
+                  <p className="text-slate-500 text-sm">Shko te "Ndeshjet e Ardhshme" për të parë ndeshjet e planifikuara</p>
+                  <button
+                    onClick={() => setActiveTab('upcoming')}
+                    className="mt-3 px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-lg text-sm font-bold transition-all"
+                  >
+                    Shiko Ndeshjet e Ardhshme →
+                  </button>
+                </div>
+              ) : (
+                <p className="text-slate-400">Asnjë ndeshje nuk u gjet për momentin.</p>
+              )}
+            </div>
           )}
 
           {Object.keys(groupedMatches).map(league => (

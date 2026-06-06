@@ -51,7 +51,12 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
   const [isBetslipOpen, setIsBetslipOpen] = useState(false);
 
   const fetchProfile = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
+    const { data: { session }, error } = await supabase.auth.getSession();
+    
+    if (error) {
+      await supabase.auth.signOut();
+    }
+
     if (session?.user) {
       const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
       setProfile(data);
